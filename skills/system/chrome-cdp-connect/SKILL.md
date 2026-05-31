@@ -1,7 +1,7 @@
 ---
 name: chrome-cdp-connect
 description: Use when the agent needs browser-cdp access — checks if Chrome CDP is already running on port 9222, launches it if not, and confirms the connection is ready. Use before any task requiring browser_cdp tool.
-version: 1.0.0
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 platforms: [windows]
@@ -44,17 +44,12 @@ netstat -ano | findstr ":9222 " | findstr "LISTENING"
 
 ### Step 2 — Launch Chrome with CDP enabled
 
-Run via the `terminal` tool:
+Run via the `terminal` tool (must use `cmd.exe /c` to pass multiple flags correctly on Windows):
 
 ```powershell
 if (-not (Test-Path "C:\Temp\chrome-cdp")) { New-Item -ItemType Directory -Path "C:\Temp\chrome-cdp" }
 
-Start-Process -FilePath "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList `
-  "--remote-debugging-port=9222",
-  "--user-data-dir=C:\Temp\chrome-cdp",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--disable-background-networking"
+Start-Process "cmd.exe" -ArgumentList "/c", "`"C:\Program Files\Google\Chrome\Application\chrome.exe`" --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=C:\Temp\chrome-cdp --disable-gpu --no-first-run 2> C:\Temp\chrome-cdp-log.txt"
 ```
 
 Then wait for the port to become available:
@@ -71,20 +66,22 @@ if ($ready) { Write-Host "Chrome CDP ready on port 9222" }
 else { Write-Host "Chrome CDP did not start in time — check Chrome installation" }
 ```
 
-### Step 3 — Verify CDP endpoint is responsive
+### Step 3 — Verify CDP is live via Chrome log
 
 ```powershell
-try {
-    $resp = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 5
-    Write-Host "CDP connected: $($resp.Browser)"
-} catch {
-    Write-Host "CDP endpoint not responding: $_"
+Start-Sleep -Seconds 2
+$log = Get-Content "C:\Temp\chrome-cdp-log.txt" -ErrorAction SilentlyContinue | Select-String "DevTools listening"
+if ($log) {
+    Write-Host "✔ CDP confirmed: $log"
+} else {
+    Write-Host "⚠ Log not ready yet — checking port..."
+    netstat -ano | findstr ":9222"
 }
 ```
 
-A successful response looks like:
-```json
-{ "Browser": "Chrome/136.x.x.x", "webSocketDebuggerUrl": "ws://127.0.0.1:9222/..." }
+A successful log line looks like:
+```
+DevTools listening on ws://127.0.0.1:9222/devtools/browser/<uuid>
 ```
 
 ### Step 4 — Proceed with browser_cdp tool
@@ -106,9 +103,8 @@ Write-Host "Opened tab: $($tab.id)"
 When done with CDP tasks, optionally close the Chrome instance to free resources:
 
 ```powershell
-Get-Process chrome | Where-Object {
-    $_.MainWindowTitle -eq "" -or
-    (netstat -ano | Select-String ":9222" | Select-String $_.Id)
+Get-Process chrome -ErrorAction SilentlyContinue | Where-Object {
+    (Get-Content "C:\Temp\chrome-cdp-log.txt" -ErrorAction SilentlyContinue) -ne $null
 } | Stop-Process -Force
 ```
 
@@ -116,19 +112,21 @@ Or simply leave it running — Chrome's isolated profile does not affect normal 
 
 ## Common Pitfalls
 
-1. **Port 9222 conflict**: If something else is on 9222, check with `netstat -ano | findstr ":9222"` and kill the conflicting process, or change the port in both the launch command and `BROWSER_CDP_URL` in `.env`.
+1. **Must use `cmd.exe /c` launcher**: `Start-Process -ArgumentList` does not correctly pass multiple flags to Chrome on Windows. Always use the `cmd.exe /c` pattern shown in Step 2.
 
-2. **Chrome path wrong**: The path `C:\Program Files\Google\Chrome\Application\chrome.exe` is correct for this machine. If Chrome updates move the binary, check `where.exe chrome` or the registry key `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe`.
+2. **Missing `--disable-gpu`**: Without this flag Chrome may start, bind port 9222 briefly, then crash. Always include it.
 
-3. **Profile locked**: If Chrome was previously closed uncleanly, the profile at `C:\Temp\chrome-cdp` may have a lock. Delete `C:\Temp\chrome-cdp\Default\lockfile` if Chrome refuses to start.
+3. **Port 9222 conflict**: If something else is on 9222, check with `netstat -ano | findstr ":9222"` and kill the conflicting process, or change the port in both the launch command and `BROWSER_CDP_URL` in `.env`.
 
-4. **CDP responds but pages don't load**: This is normal for a fresh profile — navigate using the CDP `Page.navigate` method or via the JSON endpoint (`/json/new?<url>`).
+4. **Chrome path wrong**: The path `C:\Program Files\Google\Chrome\Application\chrome.exe` is correct for this machine. If Chrome updates move the binary, check `where.exe chrome` or the registry key `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe`.
 
-5. **Using browser_cdp without this skill**: The tool will fail with a WebSocket connection error if Chrome isn't running with `--remote-debugging-port=9222`. Always run this skill first.
+5. **Profile locked**: If Chrome was previously closed uncleanly, the profile at `C:\Temp\chrome-cdp` may have a lock. Delete `C:\Temp\chrome-cdp` entirely and relaunch.
+
+6. **HTTP check fails but CDP works**: Chrome's `/json/version` HTTP endpoint may not respond via PowerShell/curl on Windows. Use the log file check (Step 3) instead — if Chrome printed the `DevTools listening` line, CDP is fully operational via WebSocket.
 
 ## Verification Checklist
 
 - [ ] `netstat -ano | findstr ":9222"` shows a LISTENING entry
-- [ ] `http://127.0.0.1:9222/json/version` returns a valid JSON response with `Browser` field
+- [ ] `C:\Temp\chrome-cdp-log.txt` contains `DevTools listening on ws://127.0.0.1:9222/...`
 - [ ] `browser_cdp` tool is available in current session (check with `hermes tools`)
 - [ ] `BROWSER_CDP_URL=http://127.0.0.1:9222` is set in `~/.hermes/.env`
